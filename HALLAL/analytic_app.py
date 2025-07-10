@@ -443,25 +443,23 @@ def embed_variables_dialog(parent_window, df_to_embed, file_path, sheet_name, va
         current_value = item_states[item_id]['checkbox_var'].get()
         item_states[item_id]['checkbox_var'].set(not current_value)
         # Treeviewの表示を更新 (チェックマークの有無)
-        var_tree.item(item_id, values=(
-            "✅" if item_states[item_id]['checkbox_var'].get() else "",
-            var_tree.item(item_id, 'values')[1],
-            var_tree.item(item_id, 'values')[2],
-            item_states[item_id]['entry_var'].get()
-        ))
+        # window_createで配置されたウィジェットは、valuesタプルで直接更新されないため、
+        # ここではTreeviewのitemのvaluesを更新するのではなく、チェックボックスの表示自体を制御する
+        # （ttk.Checkbuttonはindicatoron=Falseでチェックマークを非表示にできるが、ここではデフォルトのまま）
+        # Treeviewのitemのvaluesを更新しても、window_createで上書きされるため、意味がない。
+        # 代わりに、process_selected_variablesでitem_statesから直接値を取得する。
+        # ここでは、視覚的なフィードバックとして、チェックボックスの見た目が変わることで十分。
+        pass # item.valuesの更新は不要
 
     def on_entry_change(item_id, new_name_var):
-        # Entryの変更がTreeviewの表示に反映されるようにする
-        var_tree.item(item_id, values=(
-            "✅" if item_states[item_id]['checkbox_var'].get() else "",
-            var_tree.item(item_id, 'values')[1],
-            var_tree.item(item_id, 'values')[2],
-            new_name_var.get()
-        ))
+        # Entryの変更はStringVarにバインドされているため、自動的に更新される。
+        # Treeviewのitemのvaluesを更新する必要はない。
+        pass
 
     for col_name in df_to_embed.columns:
         default_var_name = generate_variable_name(col_name, file_path, sheet_name)
         
+        # item_idを生成し、valuesにはダミーのチェックマークとデフォルト名を入れる
         item_id = var_tree.insert('', 'end', values=("✅", col_name, default_var_name, default_var_name))
         
         # BooleanVarとStringVarを作成し、item_statesに保存
@@ -474,7 +472,6 @@ def embed_variables_dialog(parent_window, df_to_embed, file_path, sheet_name, va
         # EntryウィジェットをTreeviewのセルに配置
         entry_widget = ttk.Entry(var_tree, textvariable=new_name_var, style='TEntry')
         var_tree.window_create(item_id, column='new_name', window=entry_widget)
-        # entry_widgets[item_id] = entry_widget # 参照を保存
 
         # チェックボックス用のウィジェットをTreeviewのセルに配置
         cb = ttk.Checkbutton(var_tree, variable=checkbox_var, command=lambda item_id=item_id: toggle_checkbox(item_id), style='TCheckbutton')
@@ -482,12 +479,12 @@ def embed_variables_dialog(parent_window, df_to_embed, file_path, sheet_name, va
 
 
     def process_selected_variables():
-#        nonlocal global_variables # グローバル変数を更新
+        #nonlocal global_variables # グローバル変数を更新
         processed_count = 0
         for item_id in var_tree.get_children():
             # item_statesから現在の状態を取得
             if item_states[item_id]['checkbox_var'].get(): # チェックボックスがONの場合
-                original_col = var_tree.item(item_id, 'values')[1]
+                original_col = var_tree.item(item_id, 'values')[1] # 元の列名を取得
                 var_name = item_states[item_id]['entry_var'].get().strip() # Entryの最新の値を取得
 
                 if not var_name:
@@ -533,11 +530,19 @@ def update_variable_list(variable_listbox_widget):
         if var_info['source_sheet']:
             source_info += f" - {var_info['source_sheet']}"
         source_info += f", Col: {var_info['source_column']})"
-        variable_listbox_widget.insert(tk.END, f"{var_name} {source_info}")
+        
+        # 変数のshapeを取得
+        shape_info = ""
+        if hasattr(var_info['value'], 'shape'):
+            shape_info = f" Shape: {var_info['value'].shape}"
+        elif isinstance(var_info['value'], (int, float, bool)):
+            shape_info = f" (Scalar)"
+
+        variable_listbox_widget.insert(tk.END, f"{var_name} {source_info}{shape_info}")
 
 def embed_multiple_variables_from_selection(parent_window, file_tree_widget, 
                                             start_row_entry, end_row_entry, start_col_entry, end_col_entry,
-                                            row_label_entry, col_label_entry, filter_expression_entry, # New arg
+                                            row_label_entry, col_label_entry, filter_expression_entry, 
                                             variable_listbox_widget):
     """
     Treeviewで選択された複数のファイルから、指定範囲のデータを変数に一括で組み込む。
@@ -724,19 +729,19 @@ def show_plot_page(parent_window):
     # すべての変数コンボボックスとラベルを一度作成
     # X Variable
     x_var_label = ttk.Label(add_plot_controls_frame, text="X Variable:", style='TLabel', background="#FFFFFF")
-    x_var_combobox = ttk.Combobox(add_plot_controls_frame, values=list(global_variables.keys()), state="readonly", style='TCombobox')
+    x_var_combobox = ttk.Combobox(add_plot_controls_frame, values=list(global_variables.keys()), state="readonly", style='TCombobox', width=30)
     # Y Variable
     y_var_label = ttk.Label(add_plot_controls_frame, text="Y Variable:", style='TLabel', background="#FFFFFF")
-    y_var_combobox = ttk.Combobox(add_plot_controls_frame, values=list(global_variables.keys()), state="readonly", style='TCombobox')
+    y_var_combobox = ttk.Combobox(add_plot_controls_frame, values=list(global_variables.keys()), state="readonly", style='TCombobox', width=30)
     # Z Variable (for 3D)
     z_var_label = ttk.Label(add_plot_controls_frame, text="Z Variable (for 3D):", style='TLabel', background="#FFFFFF")
-    z_var_combobox = ttk.Combobox(add_plot_controls_frame, values=list(global_variables.keys()), state="readonly", style='TCombobox')
+    z_var_combobox = ttk.Combobox(add_plot_controls_frame, values=list(global_variables.keys()), state="readonly", style='TCombobox', width=30)
     # U Variable (for quiver/streamplot)
     u_var_label = ttk.Label(add_plot_controls_frame, text="U Variable:", style='TLabel', background="#FFFFFF")
-    u_var_combobox = ttk.Combobox(add_plot_controls_frame, values=list(global_variables.keys()), state="readonly", style='TCombobox')
+    u_var_combobox = ttk.Combobox(add_plot_controls_frame, values=list(global_variables.keys()), state="readonly", style='TCombobox', width=30)
     # V Variable (for quiver/streamplot)
     v_var_label = ttk.Label(add_plot_controls_frame, text="V Variable:", style='TLabel', background="#FFFFFF")
-    v_var_combobox = ttk.Combobox(add_plot_controls_frame, values=list(global_variables.keys()), state="readonly", style='TCombobox')
+    v_var_combobox = ttk.Combobox(add_plot_controls_frame, values=list(global_variables.keys()), state="readonly", style='TCombobox', width=30)
 
 
     # Dynamic variable input based on plot type
@@ -1324,7 +1329,8 @@ def show_file_processing_page(initial_directory_paths=None):
     variable_listbox = tk.Listbox(
         left_panel_frame,
         bg="#F8F8F8", fg="#333333", selectbackground="#3498DB", selectforeground="#FFFFFF",
-        font=("Courier", 9), relief="solid", bd=1
+        font=("Courier", 9), relief="solid", bd=1,
+        width=60 # 横幅を広く
     )
     variable_listbox.grid(row=1, column=0, sticky="nsew", padx=5, pady=(30,5))
     
@@ -1526,7 +1532,7 @@ def show_file_processing_page(initial_directory_paths=None):
         command=lambda: embed_multiple_variables_from_selection(file_processing_page, file_tree,
                                                                  start_row_entry, end_row_entry, 
                                                                  start_col_entry, end_col_entry,
-                                                                 row_label_entry, col_label_entry, filter_expression_entry, variable_listbox), # filter_expression_entryを追加
+                                                                 row_label_entry, col_label_entry, filter_expression_entry, variable_listbox),
         style='TButton',
         cursor="hand2"
     )
@@ -1553,19 +1559,25 @@ def show_file_processing_page(initial_directory_paths=None):
 
     def on_tree_select(event):
         """Treeviewでアイテムが選択されたときのイベントハンドラ。"""
-        selected_item_id = file_tree.selection()
-        if not selected_item_id:
+        selected_items = file_tree.selection() # This returns a tuple of selected item IDs
+        if not selected_items:
             return
         
         # 複数選択されている場合は、最初のアイテムのみを処理
         # これは単一ファイル表示の目的のためであり、複数ファイル操作は専用ボタンを使用
-        if isinstance(selected_item_id, tuple) and len(selected_item_id) > 1:
-            selected_item_id = selected_item_id[0] 
+        if isinstance(selected_items, tuple) and len(selected_items) > 1:
+            selected_item_id = selected_items[0] 
+        else:
+            selected_item_id = selected_items[0] if selected_items else None # selected_itemsが空でないことを確認
+
+        if not selected_item_id or not file_tree.exists(selected_item_id): # アイテムが存在するか確認
+            file_tree.selection_remove(selected_items) # 無効な選択をクリア
+            return
 
         item_tags = file_tree.item(selected_item_id, "tags")
         
         if "file" in item_tags:
-            file_path = file_tree.item(selected_item_id, "values")[0]
+            file_path = file_tree.item(selected_item_id, "values")[0] # valuesには絶対パスが格納されている
             sheet_name = None
             if file_path.lower().endswith(('.xlsx', '.xls')):
                 sheet_name = prompt_for_excel_sheet(file_processing_page, file_path)
