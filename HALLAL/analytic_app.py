@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt # For plotting
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk # For embedding plot
 from matplotlib.colors import Normalize # For colormaps
 from matplotlib import cm # For colormaps
+import scipy.interpolate as interp # For griddata (e.g., contour, streamplot)
 
 # ASCIIアートの生成
 # 'HALLAL' をかっこいいフォントで表示
@@ -434,26 +435,25 @@ def embed_variables_dialog(parent_window, df_to_embed, file_path, sheet_name, va
     var_tree.column('default_name', width=150)
     var_tree.column('new_name', width=150)
 
-    # チェックボックスの状態を管理する辞書
-    checkbox_vars = {}
-    # 新しい変数名のEntryウィジェットを管理する辞書
-    entry_widgets = {}
+    # チェックボックスの状態とEntryのテキストを管理する辞書
+    # item_id -> {'checkbox_var': tk.BooleanVar, 'entry_var': tk.StringVar}
+    item_states = {} 
 
     def toggle_checkbox(item_id):
-        current_value = checkbox_vars[item_id].get()
-        checkbox_vars[item_id].set(not current_value)
+        current_value = item_states[item_id]['checkbox_var'].get()
+        item_states[item_id]['checkbox_var'].set(not current_value)
         # Treeviewの表示を更新 (チェックマークの有無)
         var_tree.item(item_id, values=(
-            "✅" if checkbox_vars[item_id].get() else "",
+            "✅" if item_states[item_id]['checkbox_var'].get() else "",
             var_tree.item(item_id, 'values')[1],
             var_tree.item(item_id, 'values')[2],
-            entry_widgets[item_id].get()
+            item_states[item_id]['entry_var'].get()
         ))
 
     def on_entry_change(item_id, new_name_var):
         # Entryの変更がTreeviewの表示に反映されるようにする
         var_tree.item(item_id, values=(
-            "✅" if checkbox_vars[item_id].get() else "",
+            "✅" if item_states[item_id]['checkbox_var'].get() else "",
             var_tree.item(item_id, 'values')[1],
             var_tree.item(item_id, 'values')[2],
             new_name_var.get()
@@ -464,18 +464,20 @@ def embed_variables_dialog(parent_window, df_to_embed, file_path, sheet_name, va
         
         item_id = var_tree.insert('', 'end', values=("✅", col_name, default_var_name, default_var_name))
         
-        # チェックボックス用のBooleanVar
-        checkbox_vars[item_id] = tk.BooleanVar(value=True)
-        # Entry用のStringVar
+        # BooleanVarとStringVarを作成し、item_statesに保存
+        checkbox_var = tk.BooleanVar(value=True)
         new_name_var = tk.StringVar(value=default_var_name)
+        item_states[item_id] = {'checkbox_var': checkbox_var, 'entry_var': new_name_var}
+
         new_name_var.trace_add("write", lambda name, index, mode, item_id=item_id, new_name_var=new_name_var: on_entry_change(item_id, new_name_var))
 
         # EntryウィジェットをTreeviewのセルに配置
-        entry_widgets[item_id] = ttk.Entry(var_tree, textvariable=new_name_var, style='TEntry')
-        var_tree.window_create(item_id, column='new_name', window=entry_widgets[item_id])
+        entry_widget = ttk.Entry(var_tree, textvariable=new_name_var, style='TEntry')
+        var_tree.window_create(item_id, column='new_name', window=entry_widget)
+        # entry_widgets[item_id] = entry_widget # 参照を保存
 
         # チェックボックス用のウィジェットをTreeviewのセルに配置
-        cb = ttk.Checkbutton(var_tree, variable=checkbox_vars[item_id], command=lambda item_id=item_id: toggle_checkbox(item_id), style='TCheckbutton')
+        cb = ttk.Checkbutton(var_tree, variable=checkbox_var, command=lambda item_id=item_id: toggle_checkbox(item_id), style='TCheckbutton')
         var_tree.window_create(item_id, column='include', window=cb)
 
 
@@ -483,9 +485,10 @@ def embed_variables_dialog(parent_window, df_to_embed, file_path, sheet_name, va
 #        nonlocal global_variables # グローバル変数を更新
         processed_count = 0
         for item_id in var_tree.get_children():
-            if checkbox_vars[item_id].get(): # チェックボックスがONの場合
+            # item_statesから現在の状態を取得
+            if item_states[item_id]['checkbox_var'].get(): # チェックボックスがONの場合
                 original_col = var_tree.item(item_id, 'values')[1]
-                var_name = entry_widgets[item_id].get().strip()
+                var_name = item_states[item_id]['entry_var'].get().strip() # Entryの最新の値を取得
 
                 if not var_name:
                     messagebox.showwarning("警告", f"'{original_col}' の変数名が空です。スキップします。")
@@ -534,7 +537,8 @@ def update_variable_list(variable_listbox_widget):
 
 def embed_multiple_variables_from_selection(parent_window, file_tree_widget, 
                                             start_row_entry, end_row_entry, start_col_entry, end_col_entry,
-                                            row_label_entry, col_label_entry, variable_listbox_widget):
+                                            row_label_entry, col_label_entry, filter_expression_entry, # New arg
+                                            variable_listbox_widget):
     """
     Treeviewで選択された複数のファイルから、指定範囲のデータを変数に一括で組み込む。
     """
@@ -546,12 +550,14 @@ def embed_multiple_variables_from_selection(parent_window, file_tree_widget,
         return
 
     # フィルタリング/スライス条件を事前に取得
+    # これらの条件は、選択されたすべてのファイルに適用される
     row_label_input = row_label_entry.get().strip()
     start_row_idx_input = start_row_entry.get().strip()
     end_row_idx_input = end_row_entry.get().strip()
     col_label_input = col_label_entry.get().strip()
     start_col_idx_input = start_col_entry.get().strip()
     end_col_idx_input = end_col_entry.get().strip()
+    filter_expr = filter_expression_entry.get().strip() # フィルタ式も取得
 
     processed_files_count = 0
     processed_vars_count = 0
@@ -584,6 +590,19 @@ def embed_multiple_variables_from_selection(parent_window, file_tree_widget,
                     messagebox.showerror("エラー", f"ファイル '{os.path.basename(file_path)}' の読み込み中にエラーが発生しました: {e}")
                     continue
 
+            df_processed = df.copy() # 処理用のコピー
+
+            # フィルタ式を適用
+            if filter_expr:
+                try:
+                    df_processed = df_processed.query(filter_expr)
+                    if df_processed.empty:
+                        messagebox.showwarning("情報", f"ファイル '{os.path.basename(file_path)}' はフィルタリングの結果、データがありません。")
+                        continue
+                except Exception as e:
+                    messagebox.showerror("フィルタエラー", f"ファイル '{os.path.basename(file_path)}' のフィルタ式の適用中にエラーが発生しました: {e}\n式を確認してください。")
+                    continue
+
             try:
                 # 行の選択を適用
                 row_selection = slice(None)
@@ -603,13 +622,13 @@ def embed_multiple_variables_from_selection(parent_window, file_tree_widget,
 
                 # 実際にスライスを適用
                 if isinstance(row_selection, slice) and isinstance(col_selection, slice):
-                    df_slice = df.iloc[row_selection, col_selection]
+                    df_slice = df_processed.iloc[row_selection, col_selection]
                 elif isinstance(row_selection, str) and isinstance(col_selection, slice):
-                    df_slice = df.loc[[row_selection], col_selection]
+                    df_slice = df_processed.loc[[row_selection], col_selection]
                 elif isinstance(row_selection, slice) and isinstance(col_selection, str):
-                    df_slice = df.loc[row_selection, [col_selection]]
+                    df_slice = df_processed.loc[row_selection, [col_selection]]
                 elif isinstance(row_selection, str) and isinstance(col_selection, str):
-                    df_slice = df.loc[[row_selection], [col_selection]]
+                    df_slice = df_processed.loc[[row_selection], [col_selection]]
                 else:
                     messagebox.showerror("エラー", "行と列の選択の組み合わせが不正です。")
                     continue
@@ -948,23 +967,30 @@ def show_plot_page(parent_window):
                     ax.fill_between(x_data, y_data, color='skyblue', alpha=0.4, label=layer['id'])
                 elif ptype == "contour (2D)":
                     if z_data is None: raise ValueError("Z data required for contour.")
-                    X, Y = np.meshgrid(np.unique(x_data), np.unique(y_data))
-                    Z = plt.mlab.griddata(x_data, y_data, z_data, X, Y, interp='linear')
-                    ax.contour(X, Y, Z, label=layer['id'])
+                    # グリッドデータへの補間
+                    xi = np.linspace(x_data.min(), x_data.max(), 100)
+                    yi = np.linspace(y_data.min(), y_data.max(), 100)
+                    Xi, Yi = np.meshgrid(xi, yi)
+                    Zi = interp.griddata((x_data, y_data), z_data, (Xi, Yi), method='linear')
+                    ax.contour(Xi, Yi, Zi, label=layer['id'])
                 elif ptype == "contourf (2D)":
                     if z_data is None: raise ValueError("Z data required for contourf.")
-                    X, Y = np.meshgrid(np.unique(x_data), np.unique(y_data))
-                    Z = plt.mlab.griddata(x_data, y_data, z_data, X, Y, interp='linear')
-                    ax.contourf(X, Y, Z, label=layer['id'])
+                    xi = np.linspace(x_data.min(), x_data.max(), 100)
+                    yi = np.linspace(y_data.min(), y_data.max(), 100)
+                    Xi, Yi = np.meshgrid(xi, yi)
+                    Zi = interp.griddata((x_data, y_data), z_data, (Xi, Yi), method='linear')
+                    ax.contourf(Xi, Yi, Zi, label=layer['id'])
                 elif ptype == "tricontourf (2D)":
                     if z_data is None: raise ValueError("Z data required for tricontourf.")
                     ax.tricontourf(x_data, y_data, z_data, label=layer['id'])
                 elif ptype == "streamplot (2D)":
                     if u_data is None or v_data is None: raise ValueError("U and V data required for streamplot.")
-                    X, Y = np.meshgrid(np.unique(x_data), np.unique(y_data))
-                    U = plt.mlab.griddata(x_data, y_data, u_data, X, Y, interp='linear')
-                    V = plt.mlab.griddata(x_data, y_data, v_data, X, Y, interp='linear')
-                    ax.streamplot(X, Y, U, V, label=layer['id'])
+                    xi = np.linspace(x_data.min(), x_data.max(), 100)
+                    yi = np.linspace(y_data.min(), y_data.max(), 100)
+                    Xi, Yi = np.meshgrid(xi, yi)
+                    Ui = interp.griddata((x_data, y_data), u_data, (Xi, Yi), method='linear')
+                    Vi = interp.griddata((x_data, y_data), v_data, (Xi, Yi), method='linear')
+                    ax.streamplot(Xi, Yi, Ui, Vi, label=layer['id'])
                 elif ptype == "quiver (2D)":
                     if u_data is None or v_data is None: raise ValueError("U and V data required for quiver (2D).")
                     ax.quiver(x_data, y_data, u_data, v_data, label=layer['id'])
@@ -976,7 +1002,8 @@ def show_plot_page(parent_window):
                     ax.plot(x_data, y_data, z_data, label=layer['id'])
                 elif ptype == "quiver (3D)":
                     if z_data is None or u_data is None or v_data is None: raise ValueError("Z, U, V data required for 3D quiver.")
-                    ax.quiver(x_data, y_data, z_data, u_data, v_data, np.zeros_like(u_data), label=layer['id']) # Z direction is often 0 for 3D quiver unless specified
+                    # 3D quiver requires 6 arguments: X, Y, Z, U, V, W. W can be zeros_like for 2D vectors in 3D space
+                    ax.quiver(x_data, y_data, z_data, u_data, v_data, np.zeros_like(u_data), label=layer['id']) 
                 else:
                     messagebox.showwarning("警告", f"プロットタイプ '{ptype}' は未実装です。")
                     continue
@@ -1499,7 +1526,7 @@ def show_file_processing_page(initial_directory_paths=None):
         command=lambda: embed_multiple_variables_from_selection(file_processing_page, file_tree,
                                                                  start_row_entry, end_row_entry, 
                                                                  start_col_entry, end_col_entry,
-                                                                 row_label_entry, col_label_entry, variable_listbox),
+                                                                 row_label_entry, col_label_entry, filter_expression_entry, variable_listbox), # filter_expression_entryを追加
         style='TButton',
         cursor="hand2"
     )
